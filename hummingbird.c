@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
+#include <signal.h>
 #include <errno.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -108,7 +109,7 @@ errcb(struct bufferevent *b, short what, void *arg)
 void
 reportcb(int fd, short what, void *arg) {
   struct timeval now, diff;
-  int i, count;
+  int i, count, milliseconds;
 
   printf("%d\t", (int)time(NULL));
   printf("%d\t", counts.errors);
@@ -130,10 +131,13 @@ reportcb(int fd, short what, void *arg) {
     gettimeofday(&now, NULL);
     timersub(&now, &ratetv, &diff);
 
-    fprintf(stderr, "rate: %d/s\n", count / (int)diff.tv_sec);
+    milliseconds = diff.tv_sec * 1000 + diff.tv_usec / 1000;
+    if (milliseconds > 0) {
+      fprintf(stderr, "rate: %d/s\n", 1000 * count / milliseconds);
 
-    gettimeofday(&ratetv, NULL);
-    ratecount = counts.total;
+      gettimeofday(&ratetv, NULL);
+      ratecount = counts.total;
+    }
   }
 }
 
