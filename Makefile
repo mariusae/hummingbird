@@ -1,4 +1,4 @@
-hb:
+hb: hummingbird.c
 	gcc -levent -o hb hummingbird.c
 
 clean:

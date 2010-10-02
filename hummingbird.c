@@ -193,7 +193,8 @@ dispatch_request()
 int
 main(int argc, char **argv)
 {
-  int ch, i;
+  int ch, i, nprocs = 1, status, is_parent = 1;
+  pid_t pid;
   char *sp, *ap;
 
   if (signal(SIGPIPE, SIG_IGN) == SIG_ERR)
@@ -208,7 +209,7 @@ main(int argc, char **argv)
 
   memset(&counts, 0, sizeof(counts));
 
-  while ((ch = getopt(argc, argv, "c:b:n:")) != -1) {
+  while ((ch = getopt(argc, argv, "c:b:n:p:")) != -1) {
     switch (ch) {
       case 'b':
         sp = optarg;
@@ -229,28 +230,55 @@ main(int argc, char **argv)
 
       case 'c':
         params.concurrency = atoi(optarg);
+        break;
 
       case 'n':
         params.count = atoi(optarg);
         break;
+
+      case 'p':
+        nprocs = atoi(optarg);
+        break;
     }
   }
 
-  event_init();
+  params.count /= nprocs;
 
-  for (i = 0; i < params.concurrency; i++) {
-    if (dispatch_request() < 0)
-      perror("failed to dispatch request");
+  for (i = 0; i < nprocs; i++) {
+    pid = fork();
+    if (pid < 0) {
+      kill(0, SIGINT);
+      perror("fork");
+      exit(1);
+    } else if (pid != 0) {
+      continue;
+    }
+
+    is_parent = 0;
+
+    event_init();
+     
+    for (i = 0; i < params.concurrency; i++) {
+      if (dispatch_request() < 0)
+        perror("failed to dispatch request");
+    }
+
+    evtimer_set(&reportev, reportcb, NULL);
+    evtimer_add(&reportev, &reporttv);
+
+    gettimeofday(&ratetv, NULL);
+
+    event_dispatch();
+
+    fprintf(stderr, "total: %d\n", counts.total);
+    break;
   }
 
-  evtimer_set(&reportev, reportcb, NULL);
-  evtimer_add(&reportev, &reporttv);
+  if (is_parent) {
+    for (i = 0; i < nprocs; i++)
+      pid = waitpid(0, &status, 0);
+  }
 
-  gettimeofday(&ratetv, NULL);
-
-  event_dispatch();
-
-  fprintf(stderr, "total: %d\n", counts.total);
 
   return (0);
 }
