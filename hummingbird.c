@@ -82,17 +82,9 @@ errcb(struct bufferevent *b, short what, void *arg)
   int i;
   long milliseconds;
 
-  bufferevent_setcb(b, NULL, NULL, NULL, NULL);
-  bufferevent_disable(b, EV_READ | EV_WRITE);
-  bufferevent_free(b);
-  close(request->sock);
-  free(request);
-
-  counts.total++;
-
   if (what & EVBUFFER_EOF) {
     gettimeofday(&now, NULL);
-    timersub(&now, &(request->starttv), &diff);
+    timersub(&now, &request->starttv, &diff);
     milliseconds = diff.tv_sec * 1000 + diff.tv_usec / 1000;
     for (i = 0;
          params.buckets[i] < milliseconds &&
@@ -107,7 +99,14 @@ errcb(struct bufferevent *b, short what, void *arg)
       counts.timeouts++;
   }
 
+  counts.total++;
   counts.pending--;
+
+  bufferevent_setcb(b, NULL, NULL, NULL, NULL);
+  bufferevent_disable(b, EV_READ | EV_WRITE);
+  bufferevent_free(b);
+  close(request->sock);
+  free(request);
 
   /* Queue the next one. */
   if (params.count < 0 || counts.total < params.count) {
@@ -185,8 +184,8 @@ dispatch_request()
 
   }
 
-  if ((request = malloc(sizeof(*request))) == NULL)
-    errx(1, "malloc");
+  if ((request = calloc(1, sizeof(*request))) == NULL)
+    errx(1, "calloc");
 
   request->sock = sock;
   gettimeofday(&request->starttv, NULL);
@@ -290,7 +289,7 @@ main(int argc, char **argv)
       errx(1, "only 0 or 1 (host port) pair are allowed\n");
   }
 
-  /* Resolve the names. */
+  /* Resolve the name. */
   http_port = htons(port);
   if ((he = gethostbyname(host)) == NULL) {
     herror("gethostbyname");
@@ -313,8 +312,6 @@ main(int argc, char **argv)
   if (params.count > 0)
     params.count /= nprocs;
 
-  /* Resolve the name. */
-
   /* Report the report banner in the parent. */
   fprintf(stderr, "# ts\t\terrors\ttimeout\t");
   for (i = 0; params.buckets[i] != 0; i++)
@@ -334,7 +331,7 @@ main(int argc, char **argv)
     is_parent = 0;
 
     event_init();
-     
+
     for (i = 0; i < params.concurrency; i++) {
       if (dispatch_request() < 0)
         perror("failed to dispatch request");
