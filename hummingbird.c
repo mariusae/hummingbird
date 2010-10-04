@@ -16,6 +16,7 @@
 
 #include <event.h>
 
+#define NBUFFER 10
 #define MAX_BUCKETS 100
 
 char http_get_request[] = "GET / HTTP/1.0\r\n\r\n";
@@ -26,6 +27,7 @@ struct {
   int count;
   int concurrency;
   int buckets[MAX_BUCKETS];
+  int nbuckets;
 } params;
 
 struct {
@@ -43,9 +45,42 @@ struct request {
 
 struct event reportev;
 struct timeval reporttv = { 1, 0 };
+struct timeval lastreporttv;
 int request_timeout;
 struct timeval ratetv;
 int ratecount = 0;
+int nreport = 0;
+int nreportbuf[NBUFFER];
+int *reportbuf[NBUFFER];
+
+/* All of my OpenBSD niceties. */
+ssize_t
+atomicio(f, fd, _s, n)
+        ssize_t (*f) ();
+        int fd;
+        void *_s;
+        size_t n;
+{
+        char *s = _s;
+        ssize_t res, pos = 0;
+
+        while (n > pos) {
+                res = (f) (fd, s + pos, n - pos);
+                switch (res) {
+                case -1:
+                        if (errno == EINTR || errno == EAGAIN)
+                                continue;
+                case 0:
+                        if (pos != 0)
+                                return (pos);
+                        return (res);
+                default:
+                        pos += res;
+                }
+        }
+        return (pos);
+}
+
 
 void warnx(const char *fmt, ...)
 {
@@ -67,6 +102,21 @@ void errx(int code, const char *fmt, ...)
   va_end(ap);
   exit(code);
 }
+
+int
+mkrate(struct timeval *tv, int count)
+{
+  int milliseconds;
+  struct timeval now, diff;
+
+  gettimeofday(&now, NULL);
+  timersub(&now, tv, &diff);
+  milliseconds = diff.tv_sec * 1000 + diff.tv_usec / 1000;
+  *tv = now;
+
+  return (1000 * count / milliseconds);
+}
+
 
 void
 readcb(struct bufferevent *b, void *arg)
@@ -121,29 +171,28 @@ reportcb(int fd, short what, void *arg)
   struct timeval now, diff;
   int i, count, milliseconds;
 
-  printf("%d\t", (int)time(NULL));
+  printf("%d\t", nreport++);
   printf("%d\t", counts.errors);
   printf("%d\t", counts.timeouts);
 
   for (i = 0; params.buckets[i] != 0; i++)
     printf("%d\t", counts.counters[i]);
 
-  /* total: */
   printf("%d\n", counts.counters[i]);
+  fflush(stdout);
 
   memset(counts.counters, 0, sizeof(counts.counters));
 
   if (params.count < 0 || counts.total < params.count)
     evtimer_add(&reportev, &reporttv);
 
-  if ((count = counts.total - ratecount) > 10000) {
+  if (0 && (count = counts.total - ratecount) > 10000) {
     gettimeofday(&now, NULL);
     timersub(&now, &ratetv, &diff);
 
     milliseconds = diff.tv_sec * 1000 + diff.tv_usec / 1000;
     if (milliseconds > 0) {
       fprintf(stderr, "rate: %d/s\n", 1000 * count / milliseconds);
-
       gettimeofday(&ratetv, NULL);
       ratecount = counts.total;
     }
@@ -212,10 +261,92 @@ usage(char *cmd)
   exit(0);
 }
 
+void
+chldreadcb(struct bufferevent *b, void *arg)
+{
+  char *line, *sp, *ap;
+  int n, i, total, nprocs = *(int *)arg;
+
+  if ((line = evbuffer_readline(b->input)) != NULL) {
+    sp = line;
+
+    if ((ap = strsep(&sp, "\t")) == NULL)
+      errx(1, "report error\n");
+    n = atoi(ap);
+    if (n - nreport > NBUFFER)
+      errx(1, "a process fell too far behind\n");
+
+    n %= NBUFFER;
+
+    for (i = 0; i < params.nbuckets + 2 && (ap = strsep(&sp, "\t")) != NULL; i++)
+      reportbuf[n][i] += atoi(ap);
+
+    if (++nreportbuf[n] >= nprocs) {
+      /* Timestamp it.  */
+      printf("%d\t", (int)time(NULL));
+      for (i = 0; i < params.nbuckets + 2; i++)
+        printf("%d\t", reportbuf[n][i]);
+
+      /* Compute the total rate of succesful requests. */
+      total = 0;
+      for (i = 2; i < params.nbuckets + 1; i++)
+        total += reportbuf[n][i];
+
+      printf("%d\n", mkrate(&lastreporttv, total));
+
+      /* Clear it. Advance nreport. */
+      memset(reportbuf[n], 0, (params.nbuckets + 2) * sizeof(int));
+      nreportbuf[n] = 0;
+      nreport++;
+    }
+
+    free(line);
+  }
+
+  bufferevent_enable(b, EV_READ);
+}
+
+void
+chlderrcb(struct bufferevent *b, short what, void *arg)
+{
+  printf("chlderr!\n");
+
+  bufferevent_setcb(b, NULL, NULL, NULL, NULL);
+  bufferevent_disable(b, EV_READ | EV_WRITE);
+  bufferevent_free(b);
+}
+
+void
+parentd(int nprocs, int *pipes)
+{
+  int *fdp, i, status, size;
+  pid_t pid;
+  struct bufferevent *b;
+
+  gettimeofday(&lastreporttv, NULL);
+  memset(nreportbuf, 0, sizeof(nreportbuf));
+  for (i = 0; i < NBUFFER; i++) {
+    if ((reportbuf[i] = calloc(params.nbuckets + 2, sizeof(int))) == NULL)
+      errx(1, "calloc");
+  }
+
+  event_init();
+
+  for (fdp = pipes; *fdp != -1; fdp++) {
+    b = bufferevent_new(*fdp, chldreadcb, NULL, chlderrcb, (void *)&nprocs);
+    bufferevent_enable(b, EV_READ);
+  }
+
+  event_dispatch();
+
+  for (i = 0; i < nprocs; i++)
+    pid = waitpid(0, &status, 0);
+}
+
 int
 main(int argc, char **argv)
 {
-  int ch, i, nprocs = 1, status, is_parent = 1, port;
+  int ch, i, nprocs = 1, is_parent = 1, port, *pipes, fds[2];
   pid_t pid;
   char *sp, *ap, *host, *cmd = argv[0];
   struct hostent *he;
@@ -229,6 +360,7 @@ main(int argc, char **argv)
   params.buckets[0] = 1;
   params.buckets[1] = 10;
   params.buckets[2] = 100;
+  params.nbuckets = 4;
 
   memset(&counts, 0, sizeof(counts));
 
@@ -241,6 +373,8 @@ main(int argc, char **argv)
 
         for (i = 0; i < MAX_BUCKETS && (ap = strsep(&sp, ",")) != NULL; i++)
           params.buckets[i] = atoi(ap);
+
+        params.nbuckets = i;
 
         if (params.buckets[0] == 0)
           errx(1, "first bucket must be >0\n");
@@ -317,9 +451,21 @@ main(int argc, char **argv)
   for (i = 0; params.buckets[i] != 0; i++)
     fprintf(stderr, "<%d\t", params.buckets[i]);
 
-  fprintf(stderr, ">=%d\n", params.buckets[i - 1]);
+  fprintf(stderr, ">=%d\thz\n", params.buckets[i - 1]);
+
+  if ((pipes = calloc(nprocs + 1, sizeof(int))) == NULL)
+    errx(1, "malloc\n");
+
+  pipes[nprocs] = -1;
 
   for (i = 0; i < nprocs; i++) {
+    if (pipe(fds) < 0) {
+      perror("pipe");
+      exit(1);
+    }
+
+    pipes[i] = fds[0];
+
     if ((pid = fork()) < 0) {
       kill(0, SIGINT);
       perror("fork");
@@ -331,6 +477,15 @@ main(int argc, char **argv)
     is_parent = 0;
 
     event_init();
+
+    /* Set up output. */
+    if (dup2(fds[1], STDOUT_FILENO) < 0) {
+      perror("dup2");
+      exit(1);
+    }
+
+    /* needed? */
+    stdout = fdopen(fds[1], "w");
 
     for (i = 0; i < params.concurrency; i++) {
       if (dispatch_request() < 0)
@@ -350,10 +505,8 @@ main(int argc, char **argv)
     break;
   }
 
-  if (is_parent) {
-    for (i = 0; i < nprocs; i++)
-      pid = waitpid(0, &status, 0);
-  }
+  if (is_parent)
+    parentd(nprocs, pipes);
 
   return (0);
 }
