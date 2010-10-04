@@ -21,3 +21,27 @@ The default host is `127.0.0.1`, and the default port is `80`.
 
 * `-p` controls the number of processes to fork (for multiple event
   loops). The default value is `1`.
+
+`hb` produces output like the following:
+
+    $ hb localhost 8686
+    # ts                errors  timeout <1      <10     <100    >=100
+    1286169446          0       0       1251    19      3       0
+    1286169447          0       0       1621    21      1       0
+    1286169448          0       0       1995    23      0       0
+    1286169449          0       0       2125    29      0       0
+    1286169450          0       0       2388    29      0       0
+    1286169451          0       0       2380    35      0       0
+    1286169452          0       0       3069    34      0       0
+    1286169453          0       0       3095    33      0       0
+    1286169454          0       0       3160    33      0       0
+
+The first column is the timestamp, and the subsequent columns are
+according to the specified bucketing (controlled via `-b`). This
+output format is handy for analysis with the standard Unix tools. The
+banner is written to `stderr`, so only the data values are emitted to
+`stdout`.
+
+`hb` will also report the total rate to `stderr` as follows:
+
+    rate: 1986/s
