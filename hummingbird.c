@@ -5,6 +5,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netdb.h>
 
 #include <signal.h>
 #include <errno.h>
@@ -18,6 +19,8 @@
 #define MAX_BUCKETS 100
 
 char http_get_request[] = "GET / HTTP/1.0\r\n\r\n";
+uint32_t http_host;
+uint16_t http_port;
 
 struct {
   int count;
@@ -30,6 +33,7 @@ struct {
   int counters[MAX_BUCKETS + 1];
   int pending;
   int errors;
+  int timeouts;
 } counts;
 
 struct request {
@@ -39,11 +43,12 @@ struct request {
 
 struct event reportev;
 struct timeval reporttv = { 1, 0 };
-struct timeval timeouttv = { 1, 0 };
+int request_timeout;
 struct timeval ratetv;
 int ratecount = 0;
 
-void warnx(const char *fmt, ...) {
+void warnx(const char *fmt, ...)
+{
   va_list ap;
 
   va_start(ap, fmt);
@@ -52,7 +57,8 @@ void warnx(const char *fmt, ...) {
   va_end(ap);
 }
 
-void errx(int code, const char *fmt, ...) {
+void errx(int code, const char *fmt, ...)
+{
   va_list ap;
 
   va_start(ap, fmt);
@@ -82,8 +88,9 @@ errcb(struct bufferevent *b, short what, void *arg)
   close(request->sock);
   free(request);
 
+  counts.total++;
+
   if (what & EVBUFFER_EOF) {
-    counts.total++;
     gettimeofday(&now, NULL);
     timersub(&now, &(request->starttv), &diff);
     milliseconds = diff.tv_sec * 1000 + diff.tv_usec / 1000;
@@ -94,27 +101,30 @@ errcb(struct bufferevent *b, short what, void *arg)
       ;
     counts.counters[i]++;
   } else {
-    counts.errors++;
+    if (what & EVBUFFER_ERROR)
+      counts.errors++;
+    if (what & EVBUFFER_TIMEOUT)
+      counts.timeouts++;
   }
 
   counts.pending--;
 
   /* Queue the next one. */
-  if (counts.total < params.count) {
+  if (params.count < 0 || counts.total < params.count) {
     if (dispatch_request() < 0)
       perror("failed to dispatch request");
   }
 }
 
 void
-reportcb(int fd, short what, void *arg) {
+reportcb(int fd, short what, void *arg)
+{
   struct timeval now, diff;
   int i, count, milliseconds;
 
   printf("%d\t", (int)time(NULL));
   printf("%d\t", counts.errors);
-
-  /* TODO - report timeouts separately from other errors */
+  printf("%d\t", counts.timeouts);
 
   for (i = 0; params.buckets[i] != 0; i++)
     printf("%d\t", counts.counters[i]);
@@ -124,7 +134,7 @@ reportcb(int fd, short what, void *arg) {
 
   memset(counts.counters, 0, sizeof(counts.counters));
 
-  if (counts.total < params.count)
+  if (params.count < 0 || counts.total < params.count)
     evtimer_add(&reportev, &reporttv);
 
   if ((count = counts.total - ratecount) > 10000) {
@@ -150,9 +160,10 @@ dispatch_request()
   struct linger linger;
   struct request *request;
 
+  memset(&sin, 0, sizeof(sin));
   sin.sin_family = AF_INET;
-  sin.sin_addr.s_addr = htonl(0x7f000001);
-  sin.sin_port = htons(8686);
+  sin.sin_addr.s_addr = http_host;  // htonl(0x7f000001);
+  sin.sin_port = http_port;  // htons(8686);
 
   if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
     return (-1);
@@ -164,13 +175,14 @@ dispatch_request()
   linger.l_onoff = 1;
   linger.l_linger = 0;
   if (setsockopt(sock, SOL_SOCKET, SO_LINGER,
-                 (void *)&linger, sizeof(linger)) < 0) {
+                 (void *)&linger, sizeof(linger)) < 0)
     perror("setsockopt");
-  }
 
   if (connect(sock, (struct sockaddr *)&sin, sizeof(sin)) < 0 &&
       errno != EINPROGRESS) {
+    printf("errno: %d\n", errno);
     return (-1);
+
   }
 
   if ((request = malloc(sizeof(*request))) == NULL)
@@ -182,25 +194,37 @@ dispatch_request()
   b = bufferevent_new(sock, readcb, NULL, errcb, request);
   bufferevent_enable(b, EV_READ | EV_WRITE);
   bufferevent_write(b, http_get_request, sizeof(http_get_request));
-  /* Use max bucket value (seconds). */
-  bufferevent_settimeout(b, 1, 1);
+  bufferevent_settimeout(b, request_timeout, request_timeout);
 
   counts.pending++;
 
   return (0);
 }
 
+void
+usage(char *cmd)
+{
+  fprintf(
+      stderr,
+      "%s: [-c CONCURRENCY] [-b BUCKETS] "
+      "[-n COUNT] [-p NUMPROCS] [-r INTERVAL] [HOST] [PORT]\n",
+      cmd);
+
+  exit(0);
+}
+
 int
 main(int argc, char **argv)
 {
-  int ch, i, nprocs = 1, status, is_parent = 1;
+  int ch, i, nprocs = 1, status, is_parent = 1, port;
   pid_t pid;
-  char *sp, *ap;
+  char *sp, *ap, *host, *cmd = argv[0];
+  struct hostent *he;
 
   if (signal(SIGPIPE, SIG_IGN) == SIG_ERR)
     errx(1, "failed to ignore SIGPIPE\n");
 
-  params.count = 10000;
+  params.count = -1;
   params.concurrency = 1;
   memset(params.buckets, 0, sizeof(params.buckets));
   params.buckets[0] = 1;
@@ -209,7 +233,7 @@ main(int argc, char **argv)
 
   memset(&counts, 0, sizeof(counts));
 
-  while ((ch = getopt(argc, argv, "c:b:n:p:")) != -1) {
+  while ((ch = getopt(argc, argv, "c:b:n:p:r:h")) != -1) {
     switch (ch) {
       case 'b':
         sp = optarg;
@@ -239,14 +263,67 @@ main(int argc, char **argv)
       case 'p':
         nprocs = atoi(optarg);
         break;
+
+      case 'r':
+        reporttv.tv_sec = atoi(optarg);
+        break;
+
+      case 'h':
+        usage(cmd);
+        break;
     }
   }
 
-  params.count /= nprocs;
+  argc -= optind;
+  argv += optind;
+
+  host = "127.0.0.1";
+  port = 80;
+  switch (argc) {
+    case 2:
+      port = atoi(argv[1]);
+    case 1:
+      host = argv[0];
+    case 0:
+      break;
+    default:
+      errx(1, "only 0 or 1 (host port) pair are allowed\n");
+  }
+
+  /* Resolve the names. */
+  http_port = htons(port);
+  if ((he = gethostbyname(host)) == NULL) {
+    herror("gethostbyname");
+    exit(1);
+  }
+
+  if (he->h_length != 4 || he->h_addrtype != AF_INET)
+    errx(1, "unsupported address type\n");
+  if (he->h_addr_list[0] == NULL)
+    errx(1, "failed to resolve address\n");
+  if (he->h_addr_list[1] != NULL)
+    errx(1, "hostname resolves to multiple addresses\n");
+
+  /* Already in network byte order. */
+  http_host = *((uint32_t *)he->h_addr_list[0]);
+
+  for (i = 0; params.buckets[i] != 0; i++)
+    request_timeout = params.buckets[i];
+
+  if (params.count > 0)
+    params.count /= nprocs;
+
+  /* Resolve the name. */
+
+  /* Report the report banner in the parent. */
+  fprintf(stderr, "# ts\t\terrors\ttimeout\t");
+  for (i = 0; params.buckets[i] != 0; i++)
+    fprintf(stderr, "<%d\t", params.buckets[i]);
+
+  fprintf(stderr, ">=%d\n", params.buckets[i - 1]);
 
   for (i = 0; i < nprocs; i++) {
-    pid = fork();
-    if (pid < 0) {
+    if ((pid = fork()) < 0) {
       kill(0, SIGINT);
       perror("fork");
       exit(1);
@@ -270,7 +347,9 @@ main(int argc, char **argv)
 
     event_dispatch();
 
-    fprintf(stderr, "total: %d\n", counts.total);
+    /*
+     * fprintf(stderr, "total[%d]: %d\n", getpid(), counts.total);
+     */
     break;
   }
 
@@ -278,7 +357,6 @@ main(int argc, char **argv)
     for (i = 0; i < nprocs; i++)
       pid = waitpid(0, &status, 0);
   }
-
 
   return (0);
 }
