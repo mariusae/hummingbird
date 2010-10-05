@@ -309,8 +309,6 @@ chldreadcb(struct bufferevent *b, void *arg)
 void
 chlderrcb(struct bufferevent *b, short what, void *arg)
 {
-  printf("chlderr!\n");
-
   bufferevent_setcb(b, NULL, NULL, NULL, NULL);
   bufferevent_disable(b, EV_READ | EV_WRITE);
   bufferevent_free(b);
