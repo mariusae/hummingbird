@@ -67,15 +67,15 @@ atomicio(f, fd, _s, n)
 	while (n > pos) {
 		res = (f) (fd, s + pos, n - pos);
 		switch (res) {
-			case -1:			
-				if (errno == EINTR || errno == EAGAIN)
-					continue;
-			case 0:
-				if (pos != 0)
-					return (pos);
-				return (res);
-			default:
-				pos += res;
+		case -1:			
+			if (errno == EINTR || errno == EAGAIN)
+				continue;
+		case 0:
+			if (pos != 0)
+				return (pos);
+			return (res);
+		default:
+			pos += res;
 		}
 	}
 	return (pos);
@@ -249,10 +249,10 @@ void
 usage(char *cmd)
 {
 	fprintf(
-			stderr,
-			"%s: [-c CONCURRENCY] [-b BUCKETS] "
-			"[-n COUNT] [-p NUMPROCS] [-r INTERVAL] [HOST] [PORT]\n",
-			cmd);
+		stderr,
+		"%s: [-c CONCURRENCY] [-b BUCKETS] "
+		"[-n COUNT] [-p NUMPROCS] [-r INTERVAL] [HOST] [PORT]\n",
+		cmd);
 
 	exit(0);
 }
@@ -360,44 +360,44 @@ main(int argc, char **argv)
 
 	while ((ch = getopt(argc, argv, "c:b:n:p:r:h")) != -1) {
 		switch (ch) {
-			case 'b':
-				sp = optarg;
+		case 'b':
+			sp = optarg;
 
-				memset(params.buckets, 0, sizeof(params.buckets));
+			memset(params.buckets, 0, sizeof(params.buckets));
 
-				for (i = 0; i < MAX_BUCKETS && (ap = strsep(&sp, ",")) != NULL; i++)
-					params.buckets[i] = atoi(ap);
+			for (i = 0; i < MAX_BUCKETS && (ap = strsep(&sp, ",")) != NULL; i++)
+				params.buckets[i] = atoi(ap);
 
-				params.nbuckets = i;
+			params.nbuckets = i;
 
-				if (params.buckets[0] == 0)
-					errx(1, "first bucket must be >0\n");
+			if (params.buckets[0] == 0)
+				errx(1, "first bucket must be >0\n");
 
-				for (i = 1; params.buckets[i] != 0; i++) {
-					if (params.buckets[i] < params.buckets[i-1])
-						errx(1, "invalid bucket specification!\n");
-				}
-				break;
+			for (i = 1; params.buckets[i] != 0; i++) {
+				if (params.buckets[i] < params.buckets[i-1])
+					errx(1, "invalid bucket specification!\n");
+			}
+			break;
 
-			case 'c':
-				params.concurrency = atoi(optarg);
-				break;
+		case 'c':
+			params.concurrency = atoi(optarg);
+			break;
 
-			case 'n':
-				params.count = atoi(optarg);
-				break;
+		case 'n':
+			params.count = atoi(optarg);
+			break;
 
-			case 'p':
-				nprocs = atoi(optarg);
-				break;
+		case 'p':
+			nprocs = atoi(optarg);
+			break;
 
-			case 'r':
-				reporttv.tv_sec = atoi(optarg);
-				break;
+		case 'r':
+			reporttv.tv_sec = atoi(optarg);
+			break;
 
-			case 'h':
-				usage(cmd);
-				break;
+		case 'h':
+			usage(cmd);
+			break;
 		}
 	}
 
@@ -407,14 +407,14 @@ main(int argc, char **argv)
 	host = "127.0.0.1";
 	port = 80;
 	switch (argc) {
-		case 2:
-			port = atoi(argv[1]);
-		case 1:
-			host = argv[0];
-		case 0:
-			break;
-		default:
-			errx(1, "only 0 or 1 (host port) pair are allowed\n");
+	case 2:
+		port = atoi(argv[1]);
+	case 1:
+		host = argv[0];
+	case 0:
+		break;
+	default:
+		errx(1, "only 0 or 1 (host port) pair are allowed\n");
 	}
 
 	/* Resolve the name. */
