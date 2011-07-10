@@ -45,3 +45,10 @@ banner is written to `stderr`, so only the data values are emitted to
 `hb` will also report the total rate to `stderr` as follows:
 
     rate: 1986/s
+
+# TODO
+
+* support for constant rate load generation
+* persistent connections
+* should be split into two programs? load generation & http requests?
+* SIGINT prints report

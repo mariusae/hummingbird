@@ -15,45 +15,68 @@
 #include <string.h>
 
 #include <event.h>
+#include <evhttp.h>
 
 #define NBUFFER 10
 #define MAX_BUCKETS 100
 
-char http_get_request[] = "GET / HTTP/1.0\r\n\r\n";
-uint32_t http_host;
+char *http_hostname;
 uint16_t http_port;
+char http_hosthdr[2048];
 
 struct {
 	int count;
 	int concurrency;
 	int buckets[MAX_BUCKETS];
 	int nbuckets;
+	int rpc;
 } params;
 
 struct {
-	int total;
+	int successes;
 	int counters[MAX_BUCKETS + 1];
-	int pending;
 	int errors;
 	int timeouts;
+	int closes;
 } counts;
 
 struct request {
-	struct timeval starttv;
-	int sock;
+	struct timeval 			starttv;
+	struct event			timeoutev;
+	int 					sock;
+	struct evhttp_connection *evcon;
+	struct evhttp_request	*evreq;
+	int					evcon_reqno;
 };
 
-struct event reportev;
-struct timeval reporttv = { 1, 0 };
-struct timeval lastreporttv;
-int request_timeout;
-struct timeval ratetv;
-int ratecount = 0;
-int nreport = 0;
-int nreportbuf[NBUFFER];
-int *reportbuf[NBUFFER];
+enum {
+	Success,
+	Closed,
+	Error,
+	Timeout
+};
 
-/* All of my OpenBSD niceties. */
+struct event 	reportev;
+struct timeval 	reporttv = { 1, 0 };
+struct timeval	timeouttv = { 1, 0 };
+struct timeval 	lastreporttv;
+int 			request_timeout;
+struct timeval 	ratetv;
+int 			ratecount = 0;
+int			nreport = 0;
+int 			nreportbuf[NBUFFER];
+int 			*reportbuf[NBUFFER];
+
+void recvcb(struct evhttp_request *req, void *arg);
+void timeoutcb(int fd, short what, void *arg);
+struct evhttp_connection *mkhttp();
+void closecb(struct evhttp_connection *evcon, void *arg);
+void report();
+void sigint(int which);
+
+/* 
+	OpenBSD niceties. 
+*/
 ssize_t
 atomicio(f, fd, _s, n)
 	ssize_t (*f) ();
@@ -103,6 +126,10 @@ void errx(int code, const char *fmt, ...)
 	exit(code);
 }
 
+/*
+	Reporting.
+*/
+
 int
 mkrate(struct timeval *tv, int count)
 {
@@ -117,50 +144,6 @@ mkrate(struct timeval *tv, int count)
 	return (1000 * count / milliseconds);
 }
 
-
-void
-readcb(struct bufferevent *b, void *arg)
-{
-	evbuffer_drain(b->input, EVBUFFER_LENGTH(b->input));
-}
-
-void
-errcb(struct bufferevent *b, short what, void *arg)
-{
-	struct request *request = arg;
-	struct timeval now, diff;
-	int i;
-	long milliseconds;
-
-	if (what & EVBUFFER_EOF) {
-		gettimeofday(&now, NULL);
-		timersub(&now, &request->starttv, &diff);
-		milliseconds = diff.tv_sec * 1000 + diff.tv_usec / 1000;
-		for (i = 0; params.buckets[i] < milliseconds && params.buckets[i] != 0; i++) {}
-		counts.counters[i]++;
-	} else {
-		if (what & EVBUFFER_ERROR)
-			counts.errors++;
-		if (what & EVBUFFER_TIMEOUT)
-			counts.timeouts++;
-	}
-
-	counts.total++;
-	counts.pending--;
-
-	bufferevent_setcb(b, NULL, NULL, NULL, NULL);
-	bufferevent_disable(b, EV_READ | EV_WRITE);
-	bufferevent_free(b);
-	close(request->sock);
-	free(request);
-
-	/* Queue the next one. */
-	if (params.count < 0 || counts.total < params.count) {
-		if (dispatch_request() < 0)
-			perror("failed to dispatch request");
-	}
-}
-
 void
 reportcb(int fd, short what, void *arg)
 {
@@ -170,6 +153,9 @@ reportcb(int fd, short what, void *arg)
 	printf("%d\t", nreport++);
 	printf("%d\t", counts.errors);
 	printf("%d\t", counts.timeouts);
+	printf("%d\t", counts.closes);
+	
+	counts.errors = counts.timeouts = counts.closes = 0;
 
 	for (i = 0; params.buckets[i] != 0; i++)
 		printf("%d\t", counts.counters[i]);
@@ -179,83 +165,156 @@ reportcb(int fd, short what, void *arg)
 
 	memset(counts.counters, 0, sizeof(counts.counters));
 
-	if (params.count < 0 || counts.total < params.count)
+	if (params.count < 0 || counts.successes < params.count)
 		evtimer_add(&reportev, &reporttv);
-
-	if (0 && (count = counts.total - ratecount) > 10000) {
-		gettimeofday(&now, NULL);
-		timersub(&now, &ratetv, &diff);
-
-		milliseconds = diff.tv_sec * 1000 + diff.tv_usec / 1000;
-		if (milliseconds > 0) {
-			fprintf(stderr, "rate: %d/s\n", 1000 * count / milliseconds);
-			gettimeofday(&ratetv, NULL);
-			ratecount = counts.total;
-		}
-	}
 }
 
-int
-dispatch_request()
+/*
+	HTTP, via libevent's HTTP support.
+*/
+
+struct evhttp_connection *
+mkhttp()
 {
-	int sock, x;
-	struct sockaddr_in sin;
-	struct bufferevent *b;
-	struct linger linger;
-	struct request *request;
+	struct evhttp_connection *evcon;
 
-	memset(&sin, 0, sizeof(sin));
-	sin.sin_family = AF_INET;
-	sin.sin_addr.s_addr = http_host;  // htonl(0x7f000001);
-	sin.sin_port = http_port;  // htons(8686);
+	evcon = evhttp_connection_new(http_hostname, http_port);
+	if (evcon == NULL)
+		errx(1, "evhttp_connection_new");
 
-	if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
-		return (-1);
-	if (evutil_make_socket_nonblocking(sock) < 0)
-		return (-1);
+	evhttp_connection_set_closecb(evcon, &closecb, NULL);
+	/*
+		note: we manage our own per-request timeouts, since the underlying
+		library does not give us enough error reporting fidelity
+	*/
+	
+	/* also set some socket options manually. */
+	
 
-	x = 1;
-	setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (void *)&x, sizeof(x));
-	linger.l_onoff = 1;
-	linger.l_linger = 0;
-	if (setsockopt(sock, SOL_SOCKET, SO_LINGER,
-								 (void *)&linger, sizeof(linger)) < 0)
-		perror("setsockopt");
-
-	if (connect(sock, (struct sockaddr *)&sin, sizeof(sin)) < 0 &&
-			errno != EINPROGRESS) {
-		printf("errno: %d\n", errno);
-		return (-1);
-
-	}
-
-	if ((request = calloc(1, sizeof(*request))) == NULL)
-		errx(1, "calloc");
-
-	request->sock = sock;
-	gettimeofday(&request->starttv, NULL);
-
-	b = bufferevent_new(sock, readcb, NULL, errcb, request);
-	bufferevent_enable(b, EV_READ | EV_WRITE);
-	bufferevent_write(b, http_get_request, sizeof(http_get_request));
-	bufferevent_settimeout(b, request_timeout, request_timeout);
-
-	counts.pending++;
-
-	return (0);
+	return (evcon);
 }
 
 void
-usage(char *cmd)
+dispatch(struct evhttp_connection *evcon, int reqno)
 {
-	fprintf(
-		stderr,
-		"%s: [-c CONCURRENCY] [-b BUCKETS] "
-		"[-n COUNT] [-p NUMPROCS] [-r INTERVAL] [HOST] [PORT]\n",
-		cmd);
+	struct evhttp_request *evreq;
+	struct request *req;
 
-	exit(0);
+	if ((req = calloc(1, sizeof(*req))) == NULL)
+		errx(1, "calloc");
+
+	req->evcon = evcon;
+	req->evcon_reqno = reqno;
+
+	evreq = evhttp_request_new(&recvcb, req);
+	if (evreq == NULL)
+		errx(1, "evhttp_request_new");
+		
+	req->evreq = evreq;
+
+	evreq->response_code = -1;
+	evhttp_add_header(evreq->output_headers, "Host", http_hosthdr);
+
+	gettimeofday(&req->starttv, NULL);
+
+	evtimer_set(&req->timeoutev, timeoutcb, (void *)req);
+	evtimer_add(&req->timeoutev, &timeouttv);
+	
+	evhttp_make_request(evcon, evreq, EVHTTP_REQ_GET, "/");
 }
+
+void
+complete(int how, struct request *req)
+{
+	struct timeval now, diff;
+	int i, total;
+	long milliseconds;
+
+	evtimer_del(&req->timeoutev);
+	
+	switch (how) {
+	case Success:
+		gettimeofday(&now, NULL);
+		timersub(&now, &req->starttv, &diff);
+		milliseconds = diff.tv_sec * 1000 + diff.tv_usec / 1000;
+		for (i = 0; params.buckets[i] < milliseconds && params.buckets[i] != 0; i++)
+			;
+		counts.counters[i]++;
+		counts.successes++;
+		break;
+	case Error:
+		counts.errors++;
+		break;
+	case Timeout:
+		counts.timeouts++;
+		break;
+	}
+	
+	total =
+	    counts.successes + counts.errors + 
+	    counts.timeouts /*+ counts.closes*/;
+	/* enqueue the next one */
+	if (params.count < 0 || total < params.count) {
+		if (params.rpc < 0 || params.rpc > req->evcon_reqno) {
+			dispatch(req->evcon, req->evcon_reqno + 1);
+		} else {
+			evhttp_connection_free(req->evcon);
+			dispatch(mkhttp(), 1);
+		}
+	} else {
+		/* We'll count this as a close. I guess that's ok. */
+		evhttp_connection_free(req->evcon);
+		if (--params.concurrency == 0) {
+			evtimer_del(&reportev);
+			reportcb(0, 0, NULL);  /* issue a last report */
+		}
+	}
+
+	
+	free(req);
+}
+
+void
+recvcb(struct evhttp_request *evreq, void *arg)
+{
+
+	int status = Success;
+
+	/* 
+		It seems that, under certain circumstances, 
+		evreq may be null on failure.  
+
+		we'll count it as an error.
+	*/
+		 
+	if (evreq == NULL || evreq->response_code < 0)
+		status = Error;
+
+	complete(status, (struct request *)arg);
+}
+
+void
+timeoutcb(int fd, short what, void *arg)
+{
+	struct request *req = (struct request *)arg;
+	
+	/* re-establish the connection */
+	evhttp_connection_free(req->evcon);
+	req->evcon = mkhttp();
+
+	complete(Timeout, req);
+}
+
+void
+closecb(struct evhttp_connection *evcon, void *arg)
+{
+	counts.closes++;
+}
+
+
+/*
+	Aggregation.
+*/
 
 void
 chldreadcb(struct bufferevent *b, void *arg)
@@ -274,24 +333,33 @@ chldreadcb(struct bufferevent *b, void *arg)
 
 		n %= NBUFFER;
 
-		for (i = 0; i < params.nbuckets + 2 && (ap = strsep(&sp, "\t")) != NULL; i++)
+		for (i = 0; i < params.nbuckets + 3 && (ap = strsep(&sp, "\t")) != NULL; i++)
 			reportbuf[n][i] += atoi(ap);
 
 		if (++nreportbuf[n] >= nprocs) {
 			/* Timestamp it.  */
 			printf("%d\t", (int)time(NULL));
-			for (i = 0; i < params.nbuckets + 2; i++)
+			for (i = 0; i < params.nbuckets + 3; i++)
 				printf("%d\t", reportbuf[n][i]);
 
 			/* Compute the total rate of succesful requests. */
 			total = 0;
-			for (i = 2; i < params.nbuckets + 1; i++)
+			for (i = 3; i < params.nbuckets + 1; i++)
 				total += reportbuf[n][i];
 
 			printf("%d\n", mkrate(&lastreporttv, total));
+			
+			/* Aggregate. */
+			counts.errors += reportbuf[n][0];
+			counts.timeouts += reportbuf[n][1];
+			counts.closes += reportbuf[n][2];
+			for (i = 0; i < params.nbuckets; i++) {
+				counts.successes += reportbuf[n][i + 3];
+				counts.counters[i] += reportbuf[n][i + 3];
+			}
 
 			/* Clear it. Advance nreport. */
-			memset(reportbuf[n], 0, (params.nbuckets + 2) * sizeof(int));
+			memset(reportbuf[n], 0, (params.nbuckets + 3) * sizeof(int));
 			nreportbuf[n] = 0;
 			nreport++;
 		}
@@ -305,29 +373,39 @@ chldreadcb(struct bufferevent *b, void *arg)
 void
 chlderrcb(struct bufferevent *b, short what, void *arg)
 {
+	int *nprocs = (int *)arg;
+
 	bufferevent_setcb(b, NULL, NULL, NULL, NULL);
 	bufferevent_disable(b, EV_READ | EV_WRITE);
 	bufferevent_free(b);
+	
+	/*if (--(*nprocs) == 0)
+		event_loopbreak();*/
 }
 
 void
-parentd(int nprocs, int *pipes)
+parentd(int nprocs, int *sockets)
 {
 	int *fdp, i, status, size;
 	pid_t pid;
 	struct bufferevent *b;
+	
+	signal(SIGINT, sigint);
 
+	gettimeofday(&ratetv, NULL);
 	gettimeofday(&lastreporttv, NULL);
 	memset(nreportbuf, 0, sizeof(nreportbuf));
 	for (i = 0; i < NBUFFER; i++) {
-		if ((reportbuf[i] = calloc(params.nbuckets + 2, sizeof(int))) == NULL)
+		if ((reportbuf[i] = calloc(params.nbuckets + 3, sizeof(int))) == NULL)
 			errx(1, "calloc");
 	}
 
 	event_init();
 
-	for (fdp = pipes; *fdp != -1; fdp++) {
-		b = bufferevent_new(*fdp, chldreadcb, NULL, chlderrcb, (void *)&nprocs);
+	for (fdp = sockets; *fdp != -1; fdp++) {
+		b = bufferevent_new(
+		    *fdp, chldreadcb, NULL, 
+		    chlderrcb, (void *)&nprocs);
 		bufferevent_enable(b, EV_READ);
 	}
 
@@ -335,20 +413,63 @@ parentd(int nprocs, int *pipes)
 
 	for (i = 0; i < nprocs; i++)
 		pid = waitpid(0, &status, 0);
+		
+	report();
+}
+
+void
+sigint(int which)
+{
+	report();
+	exit(0);
+}
+
+void
+report()
+{
+	int i;
+
+	fprintf(stderr, "# total\t\t%d\n", counts.successes);
+	fprintf(stderr, "# errors\t%d\n", counts.errors);
+	fprintf(stderr, "# timeouts\t%d\n", counts.timeouts);
+	fprintf(stderr, "# closes\t%d\n", counts.closes);
+	for (i = 0; params.buckets[i] != 0; i++) {
+		fprintf(stderr, "# <%d\t\t%d\n", 
+		    params.buckets[i], counts.counters[i]);
+	}
+
+	fprintf(stderr, "# >=%d\t\t%d\n", 
+	    params.buckets[i - 1], counts.counters[i]);
+	fprintf(stderr, "# hz\t\t%d\n", mkrate(&ratetv, counts.successes));
+}
+
+/*
+	Main, dispatch.
+*/
+
+void
+usage(char *cmd)
+{
+	fprintf(
+		stderr,
+		"%s: [-c CONCURRENCY] [-b BUCKETS] "
+		"[-n COUNT] [-p NUMPROCS] [-r INTERVAL] [HOST] [PORT]\n",
+		cmd);
+
+	exit(0);
 }
 
 int
 main(int argc, char **argv)
 {
-	int ch, i, nprocs = 1, is_parent = 1, port, *pipes, fds[2];
+	int ch, i, nprocs = 1, is_parent = 1, port, *sockets, fds[2];
 	pid_t pid;
 	char *sp, *ap, *host, *cmd = argv[0];
 	struct hostent *he;
 
-	if (signal(SIGPIPE, SIG_IGN) == SIG_ERR)
-		errx(1, "failed to ignore SIGPIPE\n");
-
+	/* Defaults */
 	params.count = -1;
+	params.rpc = -1;
 	params.concurrency = 1;
 	memset(params.buckets, 0, sizeof(params.buckets));
 	params.buckets[0] = 1;
@@ -358,7 +479,7 @@ main(int argc, char **argv)
 
 	memset(&counts, 0, sizeof(counts));
 
-	while ((ch = getopt(argc, argv, "c:b:n:p:r:h")) != -1) {
+	while ((ch = getopt(argc, argv, "c:b:n:p:r:i:h")) != -1) {
 		switch (ch) {
 		case 'b':
 			sp = optarg;
@@ -391,8 +512,12 @@ main(int argc, char **argv)
 			nprocs = atoi(optarg);
 			break;
 
-		case 'r':
+		case 'i':
 			reporttv.tv_sec = atoi(optarg);
+			break;
+
+		case 'r':
+			params.rpc = atoi(optarg);
 			break;
 
 		case 'h':
@@ -416,23 +541,11 @@ main(int argc, char **argv)
 	default:
 		errx(1, "only 0 or 1 (host port) pair are allowed\n");
 	}
-
-	/* Resolve the name. */
-	http_port = htons(port);
-	if ((he = gethostbyname(host)) == NULL) {
-		herror("gethostbyname");
-		exit(1);
-	}
-
-	if (he->h_length != 4 || he->h_addrtype != AF_INET)
-		errx(1, "unsupported address type\n");
-	if (he->h_addr_list[0] == NULL)
-		errx(1, "failed to resolve address\n");
-	if (he->h_addr_list[1] != NULL)
-		errx(1, "hostname resolves to multiple addresses\n");
-
-	/* Already in network byte order. */
-	http_host = *((uint32_t *)he->h_addr_list[0]);
+	
+	http_hostname = host;
+	http_port = port;
+	if (snprintf(http_hosthdr, sizeof(http_hosthdr), "%s:%d", host, port) > sizeof(http_hosthdr))
+		errx(1, "snprintf");
 
 	for (i = 0; params.buckets[i] != 0; i++)
 		request_timeout = params.buckets[i];
@@ -440,31 +553,40 @@ main(int argc, char **argv)
 	if (params.count > 0)
 		params.count /= nprocs;
 
-	/* Report the report banner in the parent. */
-	fprintf(stderr, "# ts\t\terrors\ttimeout\t");
+#if 0
+	event_init();
+	dispatch(mkhttp(), 1);
+	event_dispatch(); exit(0);
+#endif
+
+	fprintf(stderr, "# params: c=%d p=%d n=%d r=%d\n", 
+	    params.concurrency, nprocs, params.count, params.rpc);
+
+	fprintf(stderr, "# ts\t\terrors\ttimeout\tcloses\t");
 	for (i = 0; params.buckets[i] != 0; i++)
 		fprintf(stderr, "<%d\t", params.buckets[i]);
 
 	fprintf(stderr, ">=%d\thz\n", params.buckets[i - 1]);
 
-	if ((pipes = calloc(nprocs + 1, sizeof(int))) == NULL)
+	if ((sockets = calloc(nprocs + 1, sizeof(int))) == NULL)
 		errx(1, "malloc\n");
 
-	pipes[nprocs] = -1;
+	sockets[nprocs] = -1;
 
 	for (i = 0; i < nprocs; i++) {
-		if (pipe(fds) < 0) {
-			perror("pipe");
+		if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) < 0) {
+			perror("socketpair");
 			exit(1);
 		}
 
-		pipes[i] = fds[0];
+		sockets[i] = fds[0];
 
 		if ((pid = fork()) < 0) {
 			kill(0, SIGINT);
 			perror("fork");
 			exit(1);
 		} else if (pid != 0) {
+			close(fds[1]);
 			continue;
 		}
 
@@ -478,29 +600,21 @@ main(int argc, char **argv)
 			exit(1);
 		}
 
-		/* needed? */
-		stdout = fdopen(fds[1], "w");
+		close(fds[1]);
 
-		for (i = 0; i < params.concurrency; i++) {
-			if (dispatch_request() < 0)
-				perror("failed to dispatch request");
-		}
+		for (i = 0; i < params.concurrency; i++)
+			dispatch(mkhttp(), 1);
 
 		evtimer_set(&reportev, reportcb, NULL);
 		evtimer_add(&reportev, &reporttv);
 
-		gettimeofday(&ratetv, NULL);
-
 		event_dispatch();
 
-		/*
-		 * fprintf(stderr, "total[%d]: %d\n", getpid(), counts.total);
-		 */
 		break;
 	}
 
 	if (is_parent)
-		parentd(nprocs, pipes);
+		parentd(nprocs, sockets);
 
 	return (0);
 }
