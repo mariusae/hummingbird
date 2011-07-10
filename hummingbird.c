@@ -425,21 +425,34 @@ sigint(int which)
 }
 
 void
+printcount(const char *name, int total, int count)
+{
+	fprintf(stderr, "# %s", name);
+	if (total > 0)
+		fprintf(stderr, "\t%d\t%.02f", count, (1.0f*count) / (1.0f*total));
+	
+	fprintf(stderr, "\n");
+}
+
+void
 report()
 {
-	int i;
+	char buf[128];
+	int i, total = counts.successes + counts.errors + counts.timeouts;
 
-	fprintf(stderr, "# total\t\t%d\n", counts.successes);
-	fprintf(stderr, "# errors\t%d\n", counts.errors);
-	fprintf(stderr, "# timeouts\t%d\n", counts.timeouts);
-	fprintf(stderr, "# closes\t%d\n", counts.closes);
+	printcount("successes", total, counts.successes);
+	printcount("errors", total, counts.errors);
+	printcount("timeouts", total, counts.timeouts);
+	printcount("closes", total, counts.closes);
 	for (i = 0; params.buckets[i] != 0; i++) {
-		fprintf(stderr, "# <%d\t\t%d\n", 
-		    params.buckets[i], counts.counters[i]);
+		snprintf(buf, sizeof(buf), "<%d\t", params.buckets[i]);
+		printcount(buf, total, counts.counters[i]);
 	}
-
-	fprintf(stderr, "# >=%d\t\t%d\n", 
-	    params.buckets[i - 1], counts.counters[i]);
+	
+	snprintf(buf, sizeof(buf), ">=%d\t", params.buckets[i - 1]);
+	printcount(buf, total, counts.counters[i]);
+	
+	/* no total */
 	fprintf(stderr, "# hz\t\t%d\n", mkrate(&ratetv, counts.successes));
 }
 
