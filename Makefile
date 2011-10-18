@@ -1,5 +1,10 @@
-hb: hummingbird.c
-	gcc $(CFLAGS) -levent -o hb hummingbird.c
+all: hb nectar
+
+hb: u.o hummingbird.o
+	$(CC) $(CFLAGS) -levent -o $@ $^
+	
+nectar: u.o nectar.o
+	$(CC) $(CFLAGS) -levent -o $@ $^
 
 clean:
-	rm -f hb
+	rm -f hb nectar *.o

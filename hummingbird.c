@@ -74,58 +74,6 @@ void closecb(struct evhttp_connection *evcon, void *arg);
 void report();
 void sigint(int which);
 
-/* 
-	OpenBSD niceties. 
-*/
-ssize_t
-atomicio(f, fd, _s, n)
-	ssize_t (*f) ();
-	int fd;
-	void *_s;
-	size_t n;
-{
-	char *s = _s;
-	ssize_t res, pos = 0;
-
-	while (n > pos) {
-		res = (f) (fd, s + pos, n - pos);
-		switch (res) {
-		case -1:			
-			if (errno == EINTR || errno == EAGAIN)
-				continue;
-		case 0:
-			if (pos != 0)
-				return (pos);
-			return (res);
-		default:
-			pos += res;
-		}
-	}
-	return (pos);
-}
-
-
-void warnx(const char *fmt, ...)
-{
-	va_list ap;
-
-	va_start(ap, fmt);
-	vfprintf(stderr, fmt, ap);
-	fflush(stderr);
-	va_end(ap);
-}
-
-void errx(int code, const char *fmt, ...)
-{
-	va_list ap;
-
-	va_start(ap, fmt);
-	vfprintf(stderr, fmt, ap);
-	fflush(stderr);
-	va_end(ap);
-	exit(code);
-}
-
 /*
 	Reporting.
 */
@@ -180,7 +128,7 @@ mkhttp()
 
 	evcon = evhttp_connection_new(http_hostname, http_port);
 	if (evcon == NULL)
-		errx(1, "evhttp_connection_new");
+		panic("evhttp_connection_new");
 
 	evhttp_connection_set_closecb(evcon, &closecb, NULL);
 	/*
@@ -201,14 +149,14 @@ dispatch(struct evhttp_connection *evcon, int reqno)
 	struct request *req;
 
 	if ((req = calloc(1, sizeof(*req))) == NULL)
-		errx(1, "calloc");
+		panic("calloc");
 
 	req->evcon = evcon;
 	req->evcon_reqno = reqno;
 
 	evreq = evhttp_request_new(&recvcb, req);
 	if (evreq == NULL)
-		errx(1, "evhttp_request_new");
+		panic("evhttp_request_new");
 		
 	req->evreq = evreq;
 
@@ -326,10 +274,10 @@ chldreadcb(struct bufferevent *b, void *arg)
 		sp = line;
 
 		if ((ap = strsep(&sp, "\t")) == NULL)
-			errx(1, "report error\n");
+			panic("report error\n");
 		n = atoi(ap);
 		if (n - nreport > NBUFFER)
-			errx(1, "a process fell too far behind\n");
+			panic("a process fell too far behind\n");
 
 		n %= NBUFFER;
 
@@ -397,7 +345,7 @@ parentd(int nprocs, int *sockets)
 	memset(nreportbuf, 0, sizeof(nreportbuf));
 	for (i = 0; i < NBUFFER; i++) {
 		if ((reportbuf[i] = calloc(params.nbuckets + 3, sizeof(int))) == NULL)
-			errx(1, "calloc");
+			panic("calloc");
 	}
 
 	event_init();
@@ -505,11 +453,11 @@ main(int argc, char **argv)
 			params.nbuckets = i;
 
 			if (params.buckets[0] == 0)
-				errx(1, "first bucket must be >0\n");
+				panic("first bucket must be >0\n");
 
 			for (i = 1; params.buckets[i] != 0; i++) {
 				if (params.buckets[i] < params.buckets[i-1])
-					errx(1, "invalid bucket specification!\n");
+					panic("invalid bucket specification!\n");
 			}
 			break;
 
@@ -552,13 +500,13 @@ main(int argc, char **argv)
 	case 0:
 		break;
 	default:
-		errx(1, "only 0 or 1 (host port) pair are allowed\n");
+		panic("only 0 or 1 (host port) pair are allowed\n");
 	}
 	
 	http_hostname = host;
 	http_port = port;
 	if (snprintf(http_hosthdr, sizeof(http_hosthdr), "%s:%d", host, port) > sizeof(http_hosthdr))
-		errx(1, "snprintf");
+		panic("snprintf");
 
 	for (i = 0; params.buckets[i] != 0; i++)
 		request_timeout = params.buckets[i];
@@ -582,7 +530,7 @@ main(int argc, char **argv)
 	fprintf(stderr, ">=%d\thz\n", params.buckets[i - 1]);
 
 	if ((sockets = calloc(nprocs + 1, sizeof(int))) == NULL)
-		errx(1, "malloc\n");
+		panic("malloc\n");
 
 	sockets[nprocs] = -1;
 
