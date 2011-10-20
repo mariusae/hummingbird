@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
+#include <string.h>
 
 void
 panic(const char *fmt, ...)
@@ -23,4 +24,11 @@ say(const char *fmt, ...)
 	printf("\n");
 	fflush(stdout);
 	va_end(ap);
+}
+
+void
+Scp(char *dst, char *src, size_t n)
+{
+	strncpy(dst, src, n);
+	dst[n-1] = '\0';
 }

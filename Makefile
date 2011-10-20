@@ -1,10 +1,17 @@
-all: hb nectar
+CFLAGS=-Wall
 
-hb: u.o hummingbird.o
-	$(CC) $(CFLAGS) -levent -o $@ $^
+all: hstress hserve hplay
+
+hstress: u.o hstress.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -levent -o $@ $^
 	
-nectar: u.o nectar.o
-	$(CC) $(CFLAGS) -levent -o $@ $^
+hserve: u.o hserve.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -levent -o $@ $^
+
+hplay: u.o hplay.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -levent -o $@ $^
 
 clean:
-	rm -f hb nectar *.o
+	rm -f hstress hserver hplay *.o
+
+.PHONY: all clean

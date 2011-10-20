@@ -157,17 +157,16 @@ dispatch(struct evhttp_connection *evcon, int reqno)
 	evreq = evhttp_request_new(&recvcb, req);
 	if (evreq == NULL)
 		panic("evhttp_request_new");
-		
+
 	req->evreq = evreq;
 
 	evreq->response_code = -1;
 	evhttp_add_header(evreq->output_headers, "Host", http_hosthdr);
 
 	gettimeofday(&req->starttv, NULL);
-
 	evtimer_set(&req->timeoutev, timeoutcb, (void *)req);
 	evtimer_add(&req->timeoutev, &timeouttv);
-	
+
 	evhttp_make_request(evcon, evreq, EVHTTP_REQ_GET, "/");
 }
 
@@ -179,7 +178,7 @@ complete(int how, struct request *req)
 	long milliseconds;
 
 	evtimer_del(&req->timeoutev);
-	
+
 	switch (how) {
 	case Success:
 		gettimeofday(&now, NULL);
@@ -197,7 +196,7 @@ complete(int how, struct request *req)
 		counts.timeouts++;
 		break;
 	}
-	
+
 	total =
 	    counts.successes + counts.errors + 
 	    counts.timeouts /*+ counts.closes*/;
