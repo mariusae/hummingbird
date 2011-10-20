@@ -1,2 +1,4 @@
-hb
-hb.dSYM
+hplay
+hserve
+hstress
+*.o
