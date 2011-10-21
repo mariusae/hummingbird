@@ -1,8 +1,12 @@
-hummingbird - no bullshit HTTP load generator.
+hummingbird - no bullshit HTTP load testing suite
+
+# hstress
+
+`hstress` generates large HTTP workloads.
 
 Options are as follows:
 
-    hb: [-c CONCURRENCY] [-b BUCKETS] [-n COUNT] [-p NUMPROCS] [-r RPC] [-i INTERVAL] [HOST] [PORT]
+    hstress [-c CONCURRENCY] [-b BUCKETS] [-n COUNT] [-p NUMPROCS] [-r RPC] [-i INTERVAL] [HOST] [PORT]
 
 The default host is `127.0.0.1`, and the default port is `80`.
 
@@ -49,6 +53,30 @@ according to the specified bucketing (controlled via `-b`). This
 output format is handy for analysis with the standard Unix tools. The
 banner is written to `stderr`, so only the data values are emitted to
 `stdout`.
+
+# hplay
+
+`hplay` replays http requests at a constant rate. Eg.
+
+	# hplay localhost 8000 100 httpreqs
+	
+will replay the HTTP requests stored in `httpreqs` to `localhost:8000` at a rate of 100 per second. Request parsing is robust so you can give it packet dumps.
+
+For example, on a server host that receives requests you wish to replay:
+
+	$ tcpdump -n -c500 -i any dst port 10100 -s0 -w capture
+	
+Then reconstruct it with [tcpflow](http://www.circlemud.org/~jelson/software/tcpflow/):
+
+	$ tcpflow -r capture -c | sed 's/^...\....\....\....\......\-...\....\....\....\......: //g' > reqs
+	
+And finally, replay these requests onto localhost:8080:
+
+	$ hplay localhost 8000 100 reqs
+
+# hserve
+
+`hserve` is a simple HTTP server that will yield a constant response.
 
 # TODO
 
