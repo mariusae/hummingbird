@@ -25,11 +25,11 @@ serve(char *host, short port)
 	assert(port != 0);
 
 	base = event_init();
-	if (base == nil) panic("malloc");
+	if(base == nil) panic("malloc");
 	http = evhttp_new(base);
-	if (http == nil) panic("malloc");
+	if(http == nil) panic("malloc");
 
-	if (evhttp_bind_socket(http, host, port) != 0)
+	if(evhttp_bind_socket(http, host, port) != 0)
 		panic("failed to bind port %d", port);
 
 	say("listening on %s:%d", host, port);
@@ -59,10 +59,10 @@ main(int argc, char **argv)
 {
 	char *end;
 
-	if (argc != 2) usage(argv[0]);
+	if(argc != 2) usage(argv[0]);
 
 	int port = strtoul(argv[1], &end, 10);
-	if (port == 0 && (errno == EINVAL || errno == ERANGE))
+	if(port == 0 && (errno == EINVAL || errno == ERANGE))
 		panic("Invalid port \"%s\"", end);
 
 	memset(content, 'Z', sizeof(content));
