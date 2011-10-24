@@ -81,3 +81,45 @@ remal(void *p, size_t siz)
 		panic("realloc");
 	return p1;
 }
+
+char *
+xfgetln(FILE *fp, size_t *len)
+{
+	static char *buf = NULL;
+	static size_t bufsiz = 0;
+	char *ptr;
+
+
+	if (buf == NULL) {
+		bufsiz = BUFSIZ;
+		if ((buf = malloc(bufsiz)) == NULL)
+			return NULL;
+	}
+
+	if (fgets(buf, bufsiz, fp) == NULL)
+		return NULL;
+
+	*len = 0;
+	while ((ptr = strchr(&buf[*len], '\n')) == NULL) {
+		size_t nbufsiz = bufsiz + BUFSIZ;
+		char *nbuf = realloc(buf, nbufsiz);
+
+		if (nbuf == NULL) {
+			int oerrno = errno;
+			free(buf);
+			errno = oerrno;
+			buf = NULL;
+			return NULL;
+		} else
+			buf = nbuf;
+
+		*len = bufsiz;
+		if (fgets(&buf[bufsiz], BUFSIZ, fp) == NULL)
+			return buf;
+
+		bufsiz = nbufsiz;
+	}
+
+	*len = (ptr - buf) + 1;
+	return buf;
+}

@@ -85,7 +85,7 @@ readline()
 		io.peeking = 0;
 		io.nread += io.buflen;
 	}else{
-		io.buf = fgetln(io.file, &io.buflen);
+		io.buf = xfgetln(io.file, &io.buflen);
 		if (io.buf != nil){
 			/*
 		 	strip trailing \n and \rs. XXX note that this may not
