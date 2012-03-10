@@ -56,7 +56,7 @@ banner is written to `stderr`, so only the data values are emitted to
 
 # hplay
 
-`hplay` replays http requests at a constant rate. Eg.
+`hplay` replays http requests at a constant rate. E.g.
 
 	# hplay localhost 8000 100 httpreqs
 	
@@ -70,7 +70,7 @@ Then reconstruct it with [tcpflow](http://www.circlemud.org/~jelson/software/tcp
 
 	$ tcpflow -r capture -c | sed 's/^...\....\....\....\......\-...\....\....\....\......: //g' > reqs
 	
-And finally, replay these requests onto localhost:8080:
+And finally, replay these requests onto localhost:8000:
 
 	$ hplay localhost 8000 100 reqs
 
