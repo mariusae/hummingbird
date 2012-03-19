@@ -61,6 +61,7 @@ enum{
 struct event 	reportev;
 struct timeval 	reporttv ={ 1, 0 };
 struct timeval	timeouttv ={ 1, 0 };
+struct timeval	zerotv = {0,0};
 struct timeval 	lastreporttv;
 int 			request_timeout;
 struct timeval 	ratetv;
@@ -68,6 +69,7 @@ int 			ratecount = 0;
 int			nreport = 0;
 int 			nreportbuf[NBUFFER];
 int 			*reportbuf[NBUFFER];
+struct event_base *evbase;
 
 void recvcb(struct evhttp_request *req, void *arg);
 void timeoutcb(int fd, short what, void *arg);
@@ -173,11 +175,19 @@ dispatch(struct evhttp_connection *evcon, int reqno)
 }
 
 void
+dispatchcb(int fd, short what, void *arg)
+{
+	free(arg);
+	dispatch(mkhttp(), 1);
+}
+
+void
 complete(int how, struct request *req)
 {
 	struct timeval now, diff;
 	int i, total;
 	long milliseconds;
+	struct event *timeoutev;
 
 	evtimer_del(&req->timeoutev);
 
@@ -205,10 +215,15 @@ complete(int how, struct request *req)
 	/* enqueue the next one */
 	if(params.count<0 || total<params.count){
 		if(params.rpc<0 || params.rpc>req->evcon_reqno){
-			dispatch(req->evcon, req->evcon_reqno + 1);
+			dispatch(req->evcon, req->evcon_reqno+1);
 		}else{
+			/* There seems to be a bug in libevent where the connection isn't really
+			 * freed until the event loop is unwound. We'll add ourselves back with a 
+			 * 0-second timeout. */
 			evhttp_connection_free(req->evcon);
-			dispatch(mkhttp(), 1);
+			timeoutev = mal(sizeof(*timeoutev));
+			evtimer_set(timeoutev, dispatchcb, (void *)timeoutev);
+			evtimer_add(timeoutev, &zerotv);
 		}
 	}else{
 		/* We'll count this as a close. I guess that's ok. */
@@ -218,7 +233,6 @@ complete(int how, struct request *req)
 			reportcb(0, 0, nil);  /* issue a last report */
 		}
 	}
-
 	
 	free(req);
 }
@@ -234,10 +248,17 @@ recvcb(struct evhttp_request *evreq, void *arg)
 		evreq may be null on failure.  
 
 		we'll count it as an error.
+		
+		it seems this happens when we run out of fds-- warn?
 	*/
-		 
-	if(evreq == nil || evreq->response_code < 0)
+
+	if(evreq == nil || evreq->response_code < 0){
+		if(evreq==nil)
+			printf("evreq==nil\n");
+		else
+			printf("code:%d\n", evreq->response_code);
 		status = Error;
+	}
 
 	complete(status,(struct request *)arg);
 }
@@ -515,7 +536,7 @@ main(int argc, char **argv)
 	if(params.count > 0)
 		params.count /= nprocs;
 
-#if 0
+#if 1
 	event_init();
 	dispatch(mkhttp(), 1);
 	event_dispatch(); exit(0);
@@ -554,7 +575,7 @@ main(int argc, char **argv)
 
 		is_parent = 0;
 
-		event_init();
+		evbase = event_init();
 
 		/* Set up output. */
 		if(dup2(fds[1], STDOUT_FILENO) < 0){
