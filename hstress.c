@@ -253,10 +253,6 @@ recvcb(struct evhttp_request *evreq, void *arg)
 	*/
 
 	if(evreq == nil || evreq->response_code < 0){
-		if(evreq==nil)
-			printf("evreq==nil\n");
-		else
-			printf("code:%d\n", evreq->response_code);
 		status = Error;
 	}
 
@@ -536,7 +532,7 @@ main(int argc, char **argv)
 	if(params.count > 0)
 		params.count /= nprocs;
 
-#if 1
+#if 0
 	event_init();
 	dispatch(mkhttp(), 1);
 	event_dispatch(); exit(0);
